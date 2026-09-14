@@ -409,6 +409,10 @@ std::vector<SP<IValue>> Values::getConfigValues() {
         MS<Float>("input:touchpad:scroll_accel_speed", "Speed threshold (px/ms) at which scroll acceleration reaches maximum.", 1.0, {.min = 0.1, .max = 5}),
         MS<Float>("input:touchpad:scroll_accel_max", "Maximum scroll acceleration multiplier.", 3.0, {.min = 1, .max = 10}),
         MS<Int>("input:touchpad:scroll_decel", "Inertial scroll coasting time (ms) after the finger lifts off the touchpad. [0=off]", 600, {.min = 0, .max = 3000}),
+        MS<String>("input:touchpad:scroll_ignore_classes",
+                   "Comma-separated window class substrings for which scroll acceleration and coasting stay disabled (e.g. browsers with their own "
+                   "touchpad inertia). Empty = apply everywhere.",
+                   STRVAL_EMPTY, {}),
         MS<Bool>("input:touchpad:middle_button_emulation", "Sending LMB and RMB simultaneously will be interpreted as a middle click.", false,
                  {.refresh = Supplementary::REFRESH_INPUT_DEVICES}),
         MS<String>("input:touchpad:tap_button_map", "Sets the tap button mapping for touchpad button emulation. [lrm/lmr]", STRVAL_EMPTY,

@@ -72,6 +72,41 @@ static constexpr int    SCROLL_COAST_TICK_MS     = 8;    // synthetic event inte
 static constexpr double SCROLL_COAST_MIN_VEL     = 0.15; // EMA delta/ms below which no coast starts
 static constexpr double SCROLL_COAST_MAX_VEL     = 8.0;  // delta/ms clamp for the coast seed
 
+// Classes for which the scroll accel/coast patch stays inactive, so apps with
+// their own touchpad inertia (browsers, some terminals) keep their native
+// behavior instead of stacking a second inertia on top of ours.
+static bool scrollWindowClassIgnored() {
+    static auto PIGNORE = CConfigValue<Config::STRING>("input:touchpad:scroll_ignore_classes");
+    const auto  PATTERN = *PIGNORE;
+
+    if (PATTERN.empty())
+        return false;
+
+    const auto MOUSECOORDS = g_pInputManager->getMouseCoordsInternal();
+    const auto PWINDOW     = Desktop::viewState()->hitTest().windowAt(MOUSECOORDS, Desktop::View::RESERVED_EXTENTS | Desktop::View::INPUT_EXTENTS | Desktop::View::ALLOW_FLOATING);
+
+    if (!PWINDOW)
+        return false;
+
+    const auto& CLASS = PWINDOW->metadata().appID();
+
+    // comma-separated tokens, case-insensitive substring match
+    size_t start = 0;
+    while (start <= PATTERN.size()) {
+        const auto  end   = PATTERN.find(',', start);
+        std::string token = PATTERN.substr(start, end == std::string::npos ? std::string::npos : end - start);
+        std::ranges::transform(token, token.begin(), [](unsigned char c) { return std::tolower(c); });
+        if (!token.empty()
+            && std::ranges::search(CLASS, token, [](unsigned char a, unsigned char b) { return std::tolower(a) == std::tolower(b); }).begin() != CLASS.end())
+            return true;
+        if (end == std::string::npos)
+            break;
+        start = end + 1;
+    }
+
+    return false;
+}
+
 CInputManager::CInputManager() {
     m_listeners.setCursorShape = PROTO::cursorShape->m_events.setShape.listen([this](const CCursorShapeProtocol::SSetShapeEvent& event) {
         if (!g_pSeatManager->m_state.pointerFocusResource)
@@ -994,8 +1029,12 @@ void CInputManager::onMouseWheel(IPointer::SAxisEvent e, SP<IPointer> pointer) {
     const bool ISTOUCHPADSCROLL = *PTOUCHPADSCROLLFACTOR <= 0.f || e.source == WL_POINTER_AXIS_SOURCE_FINGER;
     auto       factor           = ISTOUCHPADSCROLL ? *PTOUCHPADSCROLLFACTOR : *PINPUTSCROLLFACTOR;
 
+    // classes with their own touchpad inertia (browsers) keep their native feel:
+    // no acceleration and no coasting on top of their implementation
+    const bool CLASSIGNORED = ISTOUCHPADSCROLL && *PSCROLLACCELPROFILE > 0 && scrollWindowClassIgnored();
+
     // apply scroll acceleration + inertial coasting for touchpads
-    if (ISTOUCHPADSCROLL && *PSCROLLACCELPROFILE > 0) {
+    if (ISTOUCHPADSCROLL && *PSCROLLACCELPROFILE > 0 && !CLASSIGNORED) {
         const size_t   AXISIDX = e.axis == WL_POINTER_AXIS_HORIZONTAL_SCROLL ? 1 : 0;
         auto&          A       = m_touchScrollAxes[AXISIDX];
         const uint32_t now     = e.timeMs;
@@ -1138,7 +1177,7 @@ void CInputManager::onMouseWheel(IPointer::SAxisEvent e, SP<IPointer> pointer) {
     g_pSeatManager->sendPointerAxis(e.timeMs, e.axis, delta, deltaDiscrete, value120, e.source, WL_POINTER_AXIS_RELATIVE_DIRECTION_IDENTICAL);
 
     // arm the coast watchdog: if no further events arrive, the tick starts the inertial coast
-    if (ISTOUCHPADSCROLL && e.delta != 0 && *PSCROLLACCELPROFILE > 0 && *PSCROLLDECEL > 0) {
+    if (ISTOUCHPADSCROLL && e.delta != 0 && *PSCROLLACCELPROFILE > 0 && *PSCROLLDECEL > 0 && !CLASSIGNORED) {
         if (!m_scrollCoastTimer) {
             m_scrollCoastTimer = makeShared<CEventLoopTimer>(std::chrono::milliseconds(SCROLL_COAST_WATCHDOG_MS),
                                                              [this](SP<CEventLoopTimer> self, void* data) { onScrollCoastTick(); }, nullptr);
@@ -1172,6 +1211,16 @@ void CInputManager::onPointerFrame() {
 
 void CInputManager::onScrollCoastTick() {
     static auto PSCROLLDECEL = CConfigValue<Config::INTEGER>("input:touchpad:scroll_decel");
+
+    // the pointer may have moved over an ignored window (e.g. a browser)
+    // mid-coast: stop immediately so its own inertia stays in charge
+    if (scrollWindowClassIgnored()) {
+        for (auto& A : m_touchScrollAxes) {
+            A.coasting = false;
+            A.hasLast  = false;
+        }
+        return;
+    }
 
     const auto NOW           = Time::steadyNow();
     const int  DECALMS       = std::clamp((int)*PSCROLLDECEL, 0, 5000);
